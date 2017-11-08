@@ -11,7 +11,12 @@ project(WavRead)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(SOURCE_FILES main.cpp)
+set(SOURCE_FILES
+        implement_indent_write.hpp
+        implement_indent_write_base.hpp
+        project.hpp
+        main.cpp)
+
 add_executable(wavread ${SOURCE_FILES})
 include(AddBoost)
 AddBoost(wavread COMPONENTS filesystem system log thread iostreams)

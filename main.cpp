@@ -1,48 +1,12 @@
+#include "project.hpp"
+#include "implement_indent_write.hpp"
+
 #include <iostream>
 #include <iomanip>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <cstdlib>
-#include <boost/variant.hpp>
-#include <boost/filesystem.hpp>
-#include <boost/optional.hpp>
-#include <boost/log/trivial.hpp>
-#include <boost/log/core.hpp>
-#include <boost/log/expressions.hpp>
-#include <boost/iostreams/device/mapped_file.hpp>
-#include <boost/utility/string_view.hpp>
-
-namespace project {
-    using boost::optional;
-    namespace fs = boost::filesystem;
-    namespace logging = boost::log;
-    using boost::iostreams::mapped_file;
-    using string_view = std::string_view;
-    template<class...Ts> using variant = boost::variant<Ts...>;
-
-    template<class...Args>
-    inline decltype(auto) visit(Args&& ...args) { return boost::apply_visitor(std::forward<Args>(args)...); }
-
-    struct empty_type
-    {
-        constexpr bool operator ==(empty_type const&) const { return true; }
-
-        friend std::ostream& operator <<(std::ostream& os, empty_type const&)
-        {
-            return os << "{ empty }";
-        }
-
-        friend std::ostream& write(std::ostream& os, empty_type const& e, std::size_t indent)
-        {
-            return os << std::string(indent, ' ') << e;
-        }
-    };
-
-    constexpr auto empty = empty_type();
-}
-
-#define PROJECT_LOG(x) BOOST_LOG_TRIVIAL(x)
 
 using namespace std::literals;
 
@@ -70,20 +34,7 @@ void init_logging()
 }
 
 
-template<class Outer>
-struct ImplementIndentWrite
-{
-    friend std::ostream& write(std::ostream& os, ImplementIndentWrite const& wf, std::size_t indent = 0)
-    {
-        return static_cast<Outer const&>(wf).write_impl(os, indent);
-    }
 
-    friend std::ostream& operator <<(std::ostream& os, ImplementIndentWrite const& wf)
-    {
-        return write(os, static_cast<Outer const&>(wf));
-    }
-
-};
 
 unsigned int upscale(char c)
 {
@@ -155,8 +106,7 @@ struct id_desc
 };
 template<class Descriptor> constexpr std::size_t next_offset = Descriptor::offset + Descriptor::size;
 
-struct WaveFmt
-    : ImplementIndentWrite<WaveFmt>
+struct RiffChunk
 {
     using string_view = project::string_view;
 
@@ -165,11 +115,75 @@ struct WaveFmt
     {
         static constexpr std::size_t offset = 0;
     };
+
+    RiffChunk(std::uint8_t const *buffer, std::size_t size)
+        : buffer_(buffer)
+        , size_(size)
+    {
+        if (size < chunk_id_desc::size) throw std::invalid_argument("RiffChunk: not enough data for type field");
+    }
+
+    string_view chunk_id() const
+    {
+        return string_view(reinterpret_cast<char const *>(buffer_ + chunk_id_desc::offset), chunk_id_desc::size);
+    }
+
+    std::size_t extent() const { return size_; }
+
+    static std::string make_indent(std::ostream& os, std::size_t indent)
+    {
+        return std::string(indent, os.fill());
+    }
+
+    std::ostream& write_impl(std::ostream& os, std::string const& prefix) const
+    {
+        constexpr auto nl = '\n';
+        os.width(0);
+        os << prefix << "TYPE  : " << chunk_id();
+        return os;
+    }
+
+    std::uint8_t const *begin() const { return buffer_; }
+
+    std::uint8_t const *end() const { return buffer_ + size_; }
+
+private:
+    std::uint8_t const *buffer_;
+    std::size_t        size_;
+};
+
+struct SizedRiffChunk
+    : RiffChunk
+{
     struct chunk_size_desc
         : uint32_desc
     {
         static constexpr std::size_t offset = next_offset<chunk_id_desc>;
     };
+
+    SizedRiffChunk(std::uint8_t const *buffer, std::size_t size)
+        : RiffChunk(buffer, size)
+    {
+        if (size < next_offset<chunk_size_desc>)
+            throw std::invalid_argument("SizedRiffChunk - not enough space for size field");
+    }
+
+    std::size_t chunk_size() const { return extract_integer<chunk_size_desc>(begin()); }
+
+    std::ostream& write_impl(std::ostream& os, std::string const& prefix) const
+    {
+        constexpr auto lf = '\n';
+        RiffChunk::write_impl(os, prefix);
+        os << lf;
+        os << prefix << "SIZE  : " << chunk_size();
+        return os;
+    }
+};
+
+struct WaveFmt
+    : SizedRiffChunk,
+      ImplementIndentWrite<WaveFmt>
+{
     struct audio_format_desc
         : uint16_desc
     {
@@ -204,36 +218,28 @@ struct WaveFmt
 
 
     WaveFmt(std::uint8_t const *buffer, std::size_t size)
-        : buffer_(buffer)
-        , size_(size)
+        : SizedRiffChunk(buffer, size)
     {
         if (chunk_id() != "fmt ") throw std::invalid_argument("WaveFmt - invalid chunk id");
     }
 
-    string_view chunk_id() const
+    auto audio_format() const { return extract_integer<audio_format_desc>(begin()); }
+
+    auto num_channels() const { return extract_integer<num_channels_desc>(begin()); }
+
+    auto sample_rate() const { return extract_integer<sample_rate_desc>(begin()); }
+
+    auto byte_rate() const { return extract_integer<byte_rate_desc>(begin()); }
+
+    auto block_align() const { return extract_integer<block_align_desc>(begin()); }
+
+    auto bits_per_sample() const { return extract_integer<bits_per_sample_desc>(begin()); }
+
+    std::ostream& write_impl(std::ostream& os, std::string const& prefix) const
     {
-        return string_view(reinterpret_cast<char const *>(buffer_ + chunk_id_desc::offset),
-                           chunk_id_desc::size);
-    }
-
-    std::size_t chunk_size() const { return extract_integer<chunk_size_desc>(buffer_); }
-    std::size_t extent() const { return chunk_size() + next_offset<chunk_size_desc>; }
-
-    auto audio_format() const { return extract_integer<audio_format_desc>(buffer_); }
-
-    auto num_channels() const { return extract_integer<num_channels_desc>(buffer_); }
-    auto sample_rate() const { return extract_integer<sample_rate_desc>(buffer_); }
-    auto byte_rate() const { return extract_integer<byte_rate_desc>(buffer_); }
-    auto block_align() const { return extract_integer<block_align_desc>(buffer_); }
-    auto bits_per_sample() const { return extract_integer<bits_per_sample_desc>(buffer_); }
-
-    std::ostream& write_impl(std::ostream& os, std::size_t indent) const
-    {
-        constexpr auto lf     = '\n';
-        auto           prefix = std::string(indent, os.fill());
-        os.width(0);
-        os << prefix << "TYPE     : " << chunk_id() << lf;
-        os << prefix << "SIZE     : " << chunk_size() << lf;
+        constexpr auto lf = '\n';
+        SizedRiffChunk::write_impl(os, prefix);
+        os << lf;
         os << prefix << "FORMAT   : " << audio_format() << lf;
         os << prefix << "CHANNELS : " << num_channels() << lf;
         os << prefix << "RATE     : " << sample_rate() << lf;
@@ -243,64 +249,26 @@ struct WaveFmt
         return os;
     }
 
-private:
-    std::uint8_t const *buffer_;
-    std::size_t        size_;
 };
 
 struct Unknown
-    : ImplementIndentWrite<Unknown>
+    : RiffChunk,
+      ImplementIndentWrite<Unknown>
 {
     using string_view = project::string_view;
 
-    struct chunk_id_desc
-        : id_desc
-    {
-        static constexpr std::size_t offset = 0;
-    };
-
     Unknown(std::uint8_t const *buffer, std::size_t size)
-        : buffer_(buffer)
-        , size_(size)
+        : RiffChunk(buffer, size)
     {
     }
-
-    string_view chunk_id() const
-    {
-        return string_view(reinterpret_cast<char const *>(buffer_ + chunk_id_desc::offset),
-                           chunk_id_desc::size);
-    }
-
-    std::size_t chunk_size() const { return size_ - chunk_id_desc::size; }
-    std::size_t extent() const { return size_; }
-
-    std::ostream& write_impl(std::ostream& os, std::size_t indent) const
-    {
-        constexpr auto lf     = '\n';
-        auto           prefix = std::string(indent, os.fill());
-        os.width(0);
-        os << prefix << "TYPE     : " << chunk_id() << lf;
-        return os;
-    }
-
-private:
-    std::uint8_t const *buffer_;
-    std::size_t        size_;
-
 };
 
 using WaveChunk = project::variant<Unknown, WaveFmt>;
 
 struct Wave
-    : ImplementIndentWrite<Wave>
+    : RiffChunk,
+      ImplementIndentWrite<Wave>
 {
-    using string_view = project::string_view;
-
-    struct chunk_id_desc
-        : id_desc
-    {
-        static constexpr std::size_t offset = 0;
-    };
     struct first_chunk_desc
         : id_desc
     {
@@ -308,8 +276,7 @@ struct Wave
     };
 
     Wave(std::uint8_t const *buffer, std::size_t size)
-        : buffer_(buffer)
-        , size_(size)
+        : RiffChunk(buffer, size)
     {
         auto offset = first_chunk_desc::offset;
         while (offset < size) {
@@ -318,104 +285,103 @@ struct Wave
         }
     }
 
-    string_view chunk_id() const
-    {
-        return string_view(reinterpret_cast<char const *>(buffer_ + chunk_id_desc::offset), chunk_id_desc::size);
-    }
-
     string_view chunk_id_at(std::size_t offset) const
     {
-        return string_view(reinterpret_cast<char const *>(buffer_ + offset), first_chunk_desc::size);
+        return string_view(reinterpret_cast<char const *>(begin() + offset), first_chunk_desc::size);
     }
 
     WaveChunk deduce_chunk(std::size_t offset, std::size_t remaining) const
     {
         auto id = chunk_id_at(offset);
         if (id == "fmt ") {
-            return WaveFmt(buffer_ + offset, remaining);
+            return WaveFmt(begin() + offset, remaining);
         }
         else {
-            return Unknown(buffer_ + offset, remaining);
+            return Unknown(begin() + offset, remaining);
         }
     }
 
-    std::ostream& write_impl(std::ostream& os, std::size_t indent = 0) const
+    std::ostream& write_impl(std::ostream& os, std::string const& prefix) const
     {
-        constexpr auto nl     = '\n';
-        auto           prefix = std::string(indent, os.fill());
-        os.width(0);
-        os << prefix << "TYPE  : " << chunk_id() << '\n';
-        const char* biff = "";
-        for (std::size_t i = 0; i < chunks_.size(); ++i) {
-            os << biff << prefix << "CHUNK " << i << nl;
-            project::visit([indent, &os](auto&& chunk)
+        constexpr auto lf = '\n';
+        RiffChunk::write_impl(os, prefix);
+        os << lf;
+        const char       *biff        = "";
+        auto             inner_prefix = prefix + "    ";
+        for (std::size_t i            = 0; i < chunks_.size(); ++i) {
+            os << biff << prefix << "CHUNK " << i << lf;
+            project::visit([&](auto&& chunk)
                            {
-                               write(os, chunk, indent + 4);
+                               chunk.write_impl(os, inner_prefix);
                            }, chunks_[i]);
             biff = "\n";
         }
         return os;
     }
 
-
 private:
-    std::uint8_t const     *buffer_;
-    std::size_t            size_;
     std::vector<WaveChunk> chunks_;
 };
 
-using RiffChunk = project::variant<project::empty_type, Wave>;
+using RiffChunkVariant = project::variant<project::empty_type, Unknown, Wave>;
 
 struct Riff
+    : SizedRiffChunk
 {
-    using string_view = project::string_view;
-    enum
-        : std::size_t
+    struct next_chunk_desc
+        : id_desc
     {
-        chunk_id_offset   = 0,
-        chunk_size_offset = 4,
-        next_chunk_offset = 8,
-        minimum_size      = next_chunk_offset + 4
+        static constexpr std::size_t offset = next_offset<chunk_size_desc>;
     };
 
+    static constexpr auto min_possible_size = next_chunk_desc::offset;
+
     Riff(std::uint8_t const *buffer, std::size_t size)
-        : buffer_(buffer)
-        , size_(size)
+        : SizedRiffChunk(buffer, size)
     {
-        if (size < minimum_size) throw std::invalid_argument("Riff - too small: " + std::to_string(size));
+        if (size < min_possible_size) throw std::invalid_argument("Riff - too small: " + std::to_string(size));
         if (chunk_id() != "RIFF") throw std::invalid_argument("Riff - invalid chunk id: "s + std::string(chunk_id()));
-        if (next_chunk_id() == "WAVE") next_chunk_ = Wave(buffer_ + next_chunk_offset, size_ - next_chunk_offset);
+        auto offset = next_chunk_desc::offset;
+        next_chunk_ = deduce_chunk(offset, size - offset);
     }
 
-    string_view chunk_id() const { return string_view(reinterpret_cast<char const *>(buffer_), 4); }
+    RiffChunkVariant deduce_chunk(std::size_t offset, std::size_t remaining) const
+    {
+        if (offset + chunk_id_desc::size > extent())
+            return project::empty;
+
+        auto id = chunk_id_at(offset);
+        if (id == "WAVE") {
+            return Wave(begin() + offset, remaining);
+        }
+        else {
+            return Unknown(begin() + offset, remaining);
+        }
+    }
+
+    string_view chunk_id_at(std::size_t offset) const
+    {
+        return string_view(reinterpret_cast<char const *>(begin() + offset), next_chunk_desc::size);
+    }
 
     string_view next_chunk_id() const
     {
-        return string_view(reinterpret_cast<char const *>(buffer_ + next_chunk_offset), 4);
+        return string_view(reinterpret_cast<char const *>(begin() + next_chunk_desc::offset), 4);
     }
 
-    std::size_t chunk_size() const
+    std::ostream& write_impl(std::ostream& os, std::string const& prefix) const
     {
-        std::size_t result = 0;
-        int         shift  = 0;
-        auto        first  = buffer_ + chunk_size_offset;
-        auto        last   = first + 4;
-
-        for (; first != last; ++first, shift += 8) {
-            result |= (std::size_t(*first) << shift);
-        }
-
-        return result;
+        constexpr auto lf = '\n';
+        SizedRiffChunk::write_impl(os, prefix);
+        os << lf;
+        os << "NEXT  : " << next_chunk_id() << lf;
+        os << "CHUNK:\n";
+        return project::visit([&](auto&& x) -> std::ostream& { return write(os, x, 4); }, next_chunk_);
     }
 
     std::ostream& write_impl(std::ostream& os, std::size_t indent = 0) const
     {
-        os << "TYPE  : " << chunk_id() << '\n';
-        os << "LENGTH: " << chunk_size() << '\n';
-        os << "NEXT  : " << next_chunk_id() << '\n';
-        os << "detail:\n";
-        project::visit([&](auto&& x) -> std::ostream& { return write(os, x, 4); }, next_chunk_);
-        return os;
+        return write_impl(os, make_indent(os, indent));
     }
 
     friend std::ostream& operator <<(std::ostream& os, Riff const& riff)
@@ -424,9 +390,7 @@ struct Riff
     }
 
 private:
-    std::uint8_t const *buffer_;
-    std::size_t        size_;
-    RiffChunk          next_chunk_;
+    RiffChunkVariant next_chunk_;
 };
 
 int main()
