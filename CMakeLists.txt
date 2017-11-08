@@ -20,3 +20,4 @@ set(SOURCE_FILES
 add_executable(wavread ${SOURCE_FILES})
 include(AddBoost)
 AddBoost(wavread COMPONENTS filesystem system log thread iostreams)
+add_subdirectory(sample)

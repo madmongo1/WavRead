@@ -34,8 +34,6 @@ void init_logging()
 }
 
 
-
-
 unsigned int upscale(char c)
 {
     return static_cast<unsigned int>(c);
@@ -74,7 +72,8 @@ Type extract_integer(std::uint8_t const *first, little_endian, std::size_t size 
     int  shift  = 0;
     auto last   = first + size;
 
-    for (; first != last; ++first, shift += 8) {
+    for (; first != last; ++first, shift += 8)
+    {
         result |= (std::size_t(*first) << shift);
     }
 
@@ -94,15 +93,18 @@ auto extract_integer(std::uint8_t const *buffer)
 
 struct uint16_desc
 {
-    using endian = little_endian; static constexpr std::size_t size = 2;
+    using endian = little_endian;
+    static constexpr std::size_t size = 2;
 };
 struct uint32_desc
 {
-    using endian = little_endian; static constexpr std::size_t size = 4;
+    using endian = little_endian;
+    static constexpr std::size_t size = 4;
 };
 struct id_desc
 {
-    using endian = big_endian; static constexpr std::size_t size = 4;
+    using endian = big_endian;
+    static constexpr std::size_t size = 4;
 };
 template<class Descriptor> constexpr std::size_t next_offset = Descriptor::offset + Descriptor::size;
 
@@ -279,7 +281,8 @@ struct Wave
         : RiffChunk(buffer, size)
     {
         auto offset = first_chunk_desc::offset;
-        while (offset < size) {
+        while (offset < size)
+        {
             chunks_.emplace_back(deduce_chunk(offset, size - offset));
             offset += project::visit([](auto&& chunk) { return chunk.extent(); }, chunks_.back());
         }
@@ -293,10 +296,12 @@ struct Wave
     WaveChunk deduce_chunk(std::size_t offset, std::size_t remaining) const
     {
         auto id = chunk_id_at(offset);
-        if (id == "fmt ") {
+        if (id == "fmt ")
+        {
             return WaveFmt(begin() + offset, remaining);
         }
-        else {
+        else
+        {
             return Unknown(begin() + offset, remaining);
         }
     }
@@ -308,7 +313,8 @@ struct Wave
         os << lf;
         const char       *biff        = "";
         auto             inner_prefix = prefix + "    ";
-        for (std::size_t i            = 0; i < chunks_.size(); ++i) {
+        for (std::size_t i            = 0; i < chunks_.size(); ++i)
+        {
             os << biff << prefix << "CHUNK " << i << lf;
             project::visit([&](auto&& chunk)
                            {
@@ -351,10 +357,12 @@ struct Riff
             return project::empty;
 
         auto id = chunk_id_at(offset);
-        if (id == "WAVE") {
+        if (id == "WAVE")
+        {
             return Wave(begin() + offset, remaining);
         }
-        else {
+        else
+        {
             return Unknown(begin() + offset, remaining);
         }
     }
@@ -393,15 +401,22 @@ private:
     RiffChunkVariant next_chunk_;
 };
 
-int main()
+int main(int argc, char **argv)
 {
     init_logging();
-    auto                 path = project::fs::path(safe_env("HOME").value_or_eval([] { return "/"; }))
-                                / file_path;
+
+    auto path = argc > 1
+                ? project::fs::path(argv[1])
+                : project::fs::path(safe_env("HOME").value_or_eval([] { return "/"; }))
+                  / file_path;
+
 
     PROJECT_LOG(debug) << "opening: " << path << std::endl;
-    project::mapped_file riff_file(path.string(), project::mapped_file::readonly);
-    auto                 riff = Riff(reinterpret_cast<std::uint8_t const *>(riff_file.const_data()), riff_file.size());
+
+    auto riff_file = project::mapped_file(path.string(), project::mapped_file::readonly);
+
+    auto riff = Riff(reinterpret_cast<std::uint8_t const *>(riff_file.const_data()), riff_file.size());
+
     std::cout << riff << std::endl;
 
 
